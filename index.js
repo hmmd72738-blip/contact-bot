@@ -1,10 +1,12 @@
 // index.js
 
 // ===============================
-//  Advanced Telegram Contact Bot
-//  - Users can choose category, write message, give contact info
-//  - You get a nicely formatted contact card
-//  - You reply by replying to that card
+//  Simple Telegram Contact Bot (Yasin version)
+//  - User: /start দিলে শুধু welcome টেক্সট + 2টা বাটন (Reset + About)
+//  - User: যে কোনো মেসেজ পাঠালেই -> Owner এর কাছে যাবে
+//  - User: সাথে সাথে পাবে "ধন্যবাদ Yasin ভাইয়ের রিপ্লায়ের জন্য অপেক্ষা করুন!"
+//  - Owner: শুধু প্রোফাইল নাম + ইউজারের মেসেজ দেখবে (কোনো User ID টেক্সটে দেখাবে না)
+//  - Owner: ওই মেসেজে reply দিলে -> সেই ইউজারের কাছে রিপ্লাই চলে যাবে
 // ===============================
 
 require('dotenv').config();
@@ -22,7 +24,9 @@ if (!BOT_TOKEN || !OWNER_ID) {
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 console.log('✅ Bot started with polling...');
 
-// Express server (for Render ping / health check)
+// ===============================
+//  Express server (for Render ping / health check)
+// ===============================
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -35,146 +39,75 @@ app.listen(PORT, () => {
 });
 
 // ===============================
-//  Session system (simple in-memory)
+//  Helper: নাম বের করা
 // ===============================
-const sessions = {}; // { [chatId]: { step, category, tempMessage, contactInfo, startedAt } }
+function getDisplayName(from) {
+  const parts = [];
+  if (from.first_name) parts.push(from.first_name);
+  if (from.last_name) parts.push(from.last_name);
+  const fullName = parts.join(' ').trim();
 
-function resetSession(chatId) {
-  delete sessions[chatId];
-}
-
-// Helper: format user identity
-function formatUserInfo(from, chatId) {
-  const nameParts = [];
-  if (from.first_name) nameParts.push(from.first_name);
-  if (from.last_name) nameParts.push(from.last_name);
-  const fullName = nameParts.join(' ').trim() || 'Unknown Name';
-
-  const usernamePart = from.username ? ` (@${from.username})` : '';
-  return `Name: ${fullName}${usernamePart}\nUser ID: ${chatId}`;
+  if (fullName) return fullName;
+  if (from.username) return from.username;
+  return 'Unknown User';
 }
 
 // ===============================
-//  Start contact flow (step 1: choose category)
+//  Owner reply mapping
+//  ownerMessageId -> userChatId
 // ===============================
-async function startContactFlow(chatId) {
-  sessions[chatId] = {
-    step: 'chooseCategory',
-    category: null,
-    tempMessage: null,
-    contactInfo: null,
-    startedAt: Date.now()
-  };
-
-  await bot.sendMessage(
-    chatId,
-    '📨 আপনি কী ধরনের মেসেজ পাঠাতে চান?',
-    {
-      reply_markup: {
-        inline_keyboard: [
-          [
-            { text: '💬 সাধারণ কথা', callback_data: 'cat:general' },
-            { text: '💼 কাজ / প্রজেক্ট', callback_data: 'cat:work' }
-          ],
-          [
-            { text: '🐞 সমস্যা / বাগ রিপোর্ট', callback_data: 'cat:bug' },
-            { text: '❓ অন্য কিছু', callback_data: 'cat:other' }
-          ]
-        ]
-      }
-    }
-  );
-}
+const replyTargets = {};
 
 // ===============================
-//  Send final contact package to OWNER
+//  Owner এর কাছে নতুন মেসেজ পাঠানো
 // ===============================
-async function sendContactToOwner({ from, chatId, category, userMessage, contactInfo, originalMessage }) {
-  const userInfo = formatUserInfo(from, chatId);
-  const finalCategory = category || 'Simple message';
-  const finalContact = contactInfo && contactInfo.trim() !== '' ? contactInfo : 'Not provided';
+async function sendToOwner(from, userChatId, userMessageText, originalMsg) {
+  const displayName = getDisplayName(from);
 
-  // Forward original Telegram message (for context)
-  if (originalMessage && originalMessage.message_id) {
-    try {
-      await bot.forwardMessage(OWNER_ID, chatId, originalMessage.message_id);
-    } catch (err) {
-      console.error('Error forwarding message to owner:', err);
-    }
-  }
+  // টেক্সট না থাকলে fallback
+  const textPart = userMessageText && userMessageText.trim() !== ''
+    ? userMessageText
+    : '(কোনো টেক্সট মেসেজ নেই, সম্ভবত মিডিয়া পাঠানো হয়েছে)';
 
-  const textBlock =
-    `📩 New contact message\n\n` +
-    `${userInfo}\n` +
-    `Category: ${finalCategory}\n\n` +
-    `Message:\n${userMessage || '(No text)'}\n\n` +
-    `Contact info (user provided):\n${finalContact}\n\n` +
-    `💬 Reply to *this* message to answer the user.`;
+  const infoText =
+    `📩 নতুন মেসেজ\n\n` +
+    `নাম: ${displayName}\n\n` +
+    `মেসেজ:\n${textPart}`;
 
   try {
-    await bot.sendMessage(OWNER_ID, textBlock, { parse_mode: 'Markdown' });
-  } catch (err) {
-    console.error('Error sending info block to owner:', err);
-  }
+    // চাইলে আগে মূল মেসেজ forward করতে পারো (কমেন্ট খুলে দিলে)
+    // if (originalMsg && originalMsg.message_id) {
+    //   await bot.forwardMessage(OWNER_ID, userChatId, originalMsg.message_id);
+    // }
 
-  // Acknowledge to user
-  try {
-    await bot.sendMessage(
-      chatId,
-      '✅ ধন্যবাদ! আপনার মেসেজ পাঠানো হয়েছে। ইনশাআল্লাহ রিপ্লাই এখানেই পাবেন।'
-    );
+    const sent = await bot.sendMessage(OWNER_ID, infoText);
+    // Owner যে মেসেজটা পেল সেটার ID -> কোন ইউজারের সাথে লিঙ্ক
+    replyTargets[sent.message_id] = userChatId;
   } catch (err) {
-    console.error('Error sending acknowledgment to user:', err);
+    console.error('Error sending message to owner:', err);
   }
 }
 
 // ===============================
-//  Callback query handler (category select)
+//  Reset chat (soft reset)
+//  - আসলে Telegram পুরো চ্যাট মুছে ফেলার API দেয় না
+//  - তাই এখানে শুধু বটের পক্ষ থেকে সেশন/লিঙ্ক পরিষ্কার + ইনস্ট্রাকশন
 // ===============================
-bot.on('callback_query', async (query) => {
-  const data = query.data;
-  const msg = query.message;
-  if (!msg) return;
-
-  const chatId = msg.chat.id;
-  const from = query.from;
-  const isOwner = String(chatId) === String(OWNER_ID);
-
-  // Ignore for owner
+async function handleReset(chatId, isOwner) {
+  // সব mapping ক্লিয়ার (Owner side থেকে করলে সকল ইউজার ম্যাপ উড়ে যাবে)
   if (isOwner) {
-    await bot.answerCallbackQuery(query.id);
-    return;
+    for (const key of Object.keys(replyTargets)) {
+      delete replyTargets[key];
+    }
   }
 
-  if (!data || !data.startsWith('cat:')) {
-    await bot.answerCallbackQuery(query.id);
-    return;
-  }
+  const textForUser =
+    '🔄 চ্যাট রিসেট করা হয়েছে (বটের দিক থেকে)।\n' +
+    'যদি পুরো হিস্টরি একদম ফাঁকা করতে চান, তবে Telegram এর উপরের ⋮ মেনু থেকে "Clear history" / "Delete chat" ব্যবহার করুন।\n\n' +
+    'এখন চাইলে নতুন করে মেসেজ পাঠাতে পারেন।';
 
-  const categoryKey = data.split(':')[1] || 'general';
-  let categoryLabel = 'General';
-
-  if (categoryKey === 'general') categoryLabel = 'General';
-  if (categoryKey === 'work') categoryLabel = 'Work / Project';
-  if (categoryKey === 'bug') categoryLabel = 'Bug / Problem';
-  if (categoryKey === 'other') categoryLabel = 'Other';
-
-  sessions[chatId] = {
-    step: 'awaitingMessage',
-    category: categoryLabel,
-    tempMessage: null,
-    contactInfo: null,
-    startedAt: Date.now()
-  };
-
-  await bot.answerCallbackQuery(query.id);
-  await bot.sendChatAction(chatId, 'typing');
-
-  await bot.sendMessage(
-    chatId,
-    `✍️ ঠিক আছে, "${categoryLabel}" সিলেক্ট করেছেন। এখন আপনার মেসেজ লিখে পাঠান.\n\n/cancel লিখে যে কোনো সময় বাতিল করতে পারেন।`
-  );
-});
+  await bot.sendMessage(chatId, textForUser);
+}
 
 // ===============================
 //  Main message handler
@@ -188,87 +121,100 @@ bot.on('message', async (msg) => {
 
   const isOwner = String(chatId) === String(OWNER_ID);
 
-  // ---------- OWNER (You) ----------
+  // ---------- OWNER SIDE ----------
   if (isOwner) {
-    // Owner replies to bot's info message => send reply to original user
-    if (msg.reply_to_message && msg.reply_to_message.text) {
-      const originalText = msg.reply_to_message.text;
-      const match = originalText.match(/User ID:\s*(\d+)/);
-
-      if (match) {
-        const targetUserId = match[1];
-
-        try {
-          if (text) {
-            await bot.sendMessage(
-              targetUserId,
-              `📨 Reply from admin:\n\n${text}`
-            );
-            await bot.sendMessage(
-              OWNER_ID,
-              `✅ Sent your reply to user (${targetUserId}).`
-            );
-          } else {
-            await bot.sendMessage(
-              OWNER_ID,
-              '⚠️ Only text replies are supported for now.'
-            );
-          }
-        } catch (err) {
-          console.error('Error sending message to user:', err);
-          await bot.sendMessage(
-            OWNER_ID,
-            '❌ Failed to send reply to user. Maybe they blocked the bot or an error occurred.'
-          );
-        }
-      } else {
-        await bot.sendMessage(
-          OWNER_ID,
-          '⚠️ Could not find User ID in the replied message. Please reply to the message that contains "User ID: ...".'
-        );
-      }
-    } else {
-      // Non-reply messages from owner => show quick help
-      if (text === '/start' || text === '/help') {
-        await bot.sendMessage(
-          OWNER_ID,
-          '👋 You are the OWNER.\n\nযখন কোনো ইউজার এই বটে মেসেজ পাঠাবে, তুমি তাদের ইনফোসহ নোটিফিকেশন পাবে।\nওই মেসেজে "User ID: ..." লাইন থাকবে।\n\n👉 ওই মেসেজে *reply* করলে বট স্বয়ংক্রিয়ভাবে ওই ইউজারের কাছে তোমার রিপ্লাই পাঠিয়ে দেবে।',
-          { parse_mode: 'Markdown' }
-        );
-      } else {
-        await bot.sendMessage(
-          OWNER_ID,
-          'ℹ️ তুমি OWNER মোডে আছো। কোনো ইউজারের মেসেজে রিপ্লাই করলে, সেটা সেই ইউজারের কাছে চলে যাবে।'
-        );
-      }
+    // Owner /start => ছোট Help
+    if (text === '/start' || text === '/help') {
+      await bot.sendMessage(
+        OWNER_ID,
+        '👋 Owner panel\n\n' +
+          '➤ কেউ এই বটকে মেসেজ করলে তুমি শুধু তার নাম + মেসেজ দেখবে।\n' +
+          '➤ সেই মেসেজে reply দিলে, তোমার রিপ্লাই সরাসরি সেই ইউজারের কাছে যাবে।\n' +
+          '➤ নিচের "🔄 Reset chat" বাটন দিয়ে শুধু বটের দিক থেকে লিঙ্ক/সেশন রিসেট হয়।',
+      );
+      return;
     }
 
-    return;
-  }
+    // Owner Reset button
+    if (text === '🔄 Reset chat') {
+      await handleReset(chatId, true);
+      return;
+    }
 
-  // ---------- NORMAL USER ----------
+    // About button
+    if (text === 'ℹ️ About this bot') {
+      await bot.sendMessage(
+        chatId,
+        'ℹ️ এই বটটি শুধু Yasin ভাইয়ের জন্য একটি সহজ কন্টাক্ট সিস্টেম।\n\n' +
+          '➤ ইউজারের মেসেজ সরাসরি তার কাছে যায়\n' +
+          '➤ তিনি reply দিলে, তা আবার বটের মাধ্যমে ইউজার পেয়ে যায়।'
+      );
+      return;
+    }
 
-  // /cancel => reset session
-  if (text === '/cancel') {
-    resetSession(chatId);
+    // Owner যদি কোনো মেসেজে reply করে
+    if (msg.reply_to_message) {
+      const repliedId = msg.reply_to_message.message_id;
+      const targetUserId = replyTargets[repliedId];
+
+      if (!targetUserId) {
+        await bot.sendMessage(
+          OWNER_ID,
+          '⚠️ এই মেসেজের সাথে কোনো ইউজার লিঙ্ক পাওয়া যায়নি।\n' +
+            'সম্ভবত বট রিস্টার্ট হয়েছে বা পুরনো মেসেজে রিপ্লাই দিচ্ছেন।'
+        );
+        return;
+      }
+
+      if (!text) {
+        await bot.sendMessage(
+          OWNER_ID,
+          '⚠️ এখন শুধু টেক্সট রিপ্লাই সাপোর্টেড।'
+        );
+        return;
+      }
+
+      try {
+        await bot.sendMessage(
+          targetUserId,
+          `📨 Yasin ভাই থেকে রিপ্লাই:\n\n${text}`
+        );
+        await bot.sendMessage(
+          OWNER_ID,
+          '✅ ইউজারের কাছে রিপ্লাই পাঠানো হয়েছে।'
+        );
+      } catch (err) {
+        console.error('Error sending owner reply to user:', err);
+        await bot.sendMessage(
+          OWNER_ID,
+          '❌ ইউজারের কাছে রিপ্লাই পাঠানো যায়নি। সম্ভবত তিনি বট ব্লক করেছেন বা অন্য কোনো সমস্যা হয়েছে।'
+        );
+      }
+
+      return;
+    }
+
+    // Owner এর সাধারণ মেসেজ (reply না হলে) -> কিছু না, শুধু হিন্ট
     await bot.sendMessage(
-      chatId,
-      '❌ কন্টাক্ট প্রক্রিয়া বাতিল করা হয়েছে। আবার শুরু করতে /start বা "📨 Contact admin" চাপুন।'
+      OWNER_ID,
+      'ℹ️ কোনো ইউজারের মেসেজে রিপ্লাই করলে, সেটা সেই ইউজারের কাছে চলে যাবে।'
     );
     return;
   }
 
-  // Welcome / menu
+  // ---------- USER SIDE ----------
+
+  // /start => কেবল welcome মেসেজ + ২টা বাটন
   if (text === '/start' || text === '/help') {
     await bot.sendChatAction(chatId, 'typing');
 
     await bot.sendMessage(
       chatId,
-      '👋 Assalamualaikum!\n\nআমি Yasin ভাইয়ের কন্টাক্ট বট। এখানে মেসেজ করলে তা তার কাছে পৌঁছে যাবে, আর তিনি রিপ্লাই দিলে এখানেই পেয়ে যাবেন ইনশাআল্লাহ।\n\n👇 নিচের বাটন থেকে শুরু করুন:',
+      'Assalamualaikum!\n\nআমি Yasin ভাইয়ের কন্টাক্ট বট। \nযে কোন বিষয় জানতে আমাকে মেসেজ করুন!',
       {
         reply_markup: {
           keyboard: [
-            [{ text: '📨 Contact admin' }, { text: 'ℹ️ About this bot' }]
+            [{ text: '🔄 Reset chat' }, { text: 'ℹ️ About this bot' }]
           ],
           resize_keyboard: true,
           one_time_keyboard: false
@@ -278,80 +224,36 @@ bot.on('message', async (msg) => {
     return;
   }
 
-  // Quick buttons
-  if (text === '📨 Contact admin') {
-    await startContactFlow(chatId);
+  // Reset button (user side)
+  if (text === '🔄 Reset chat') {
+    await handleReset(chatId, false);
     return;
   }
 
+  // About button (user side)
   if (text === 'ℹ️ About this bot') {
     await bot.sendChatAction(chatId, 'typing');
     await bot.sendMessage(
       chatId,
-      'ℹ️ এই বটটি শুধু একটি সহজ কন্টাক্ট সিস্টেম।\n\n✅ আপনার মেসেজ সরাসরি অ্যাডমিনের কাছে যায়\n✅ তিনি রিপ্লাই করলে আপনি এখানেই রিপ্লাই পাবেন\n✅ কোনো টেকনিক্যাল সেটআপ বুঝতে হবে না, শুধু লিখে পাঠান 🙂'
+      'ℹ️ এই বটের মাধ্যমে আপনি যে কোনো বিষয়ে Yasin ভাইকে মেসেজ করতে পারবেন।\n\n' +
+        'আপনি এখানে যা লিখবেন, তা সরাসরি তাঁর কাছে পৌঁছে যাবে, আর তিনি রিপ্লাই দিলে আপনি এখানেই পেয়ে যাবেন ইনশাআল্লাহ।'
     );
     return;
   }
 
-  // Session logic (multi-step contact form)
-  const session = sessions[chatId];
-
-  // Step: user writing message
-  if (session && session.step === 'awaitingMessage') {
-    if (!text) {
-      await bot.sendMessage(
-        chatId,
-        '⚠️ অনুগ্রহ করে টেক্সট আকারে আপনার মেসেজ লিখুন।'
-      );
-      return;
-    }
-
-    session.tempMessage = text;
-    session.step = 'awaitingContact';
-
-    await bot.sendChatAction(chatId, 'typing');
-
-    await bot.sendMessage(
-      chatId,
-      '📧 চাইলে আপনার ইমেইল / টেলিগ্রাম ইউজারনেম / অন্য কোনো কন্টাক্ট ডিটেইল লিখে পাঠাতে পারেন, যেন প্রয়োজনে সহজে আপনার সাথে যোগাযোগ করা যায়।\n\nযদি না দিতে চান, তাহলে শুধু "skip" লিখে পাঠিয়ে দিন।'
-    );
-    return;
-  }
-
-  // Step: user giving contact info (or skip)
-  if (session && session.step === 'awaitingContact') {
-    let contactInfo = text || '';
-    if (contactInfo.toLowerCase() === 'skip') {
-      contactInfo = '';
-    }
-
-    session.contactInfo = contactInfo;
-
-    await bot.sendChatAction(chatId, 'typing');
-
-    // Send everything to OWNER
-    await sendContactToOwner({
-      from,
-      chatId,
-      category: session.category,
-      userMessage: session.tempMessage,
-      contactInfo: session.contactInfo,
-      originalMessage: msg
-    });
-
-    resetSession(chatId);
-    return;
-  }
-
-  // If no active session => simple one-shot message (fallback mode)
+  // বাকি সবকিছুই -> কন্টাক্ট মেসেজ হিসেবে ধরা হবে
   await bot.sendChatAction(chatId, 'typing');
 
-  await sendContactToOwner({
-    from,
-    chatId,
-    category: 'Simple message',
-    userMessage: text,
-    contactInfo: '',
-    originalMessage: msg
-  });
+  // Owner কে পাঠাও (শুধু নাম + মেসেজ)
+  await sendToOwner(from, chatId, text, msg);
+
+  // ইউজারকে reply
+  try {
+    await bot.sendMessage(
+      chatId,
+      'ধন্যবাদ! Yasin ভাইয়ের রিপ্লায়ের জন্য অপেক্ষা করুন!'
+    );
+  } catch (err) {
+    console.error('Error sending thank you message to user:', err);
+  }
 });
